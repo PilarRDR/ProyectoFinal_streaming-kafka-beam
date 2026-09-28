@@ -2,7 +2,10 @@ import pytest
 import apache_beam as beam
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.util import assert_that, equal_to
-from pipeline import DeduplicateDoFn
+from apache_beam.transforms.window import TimestampedValue, FixedWindows
+
+# Importar las clases del pipeline
+from pipeline import DeduplicateDoFn, ParseAndTimestampDoFn, CountEventsCombineFn
 
 
 def test_deduplication_logic():
@@ -24,7 +27,7 @@ def test_deduplication_logic():
 
 
 def test_unique_events_pass_through():
-    """Valida que eventos unicos sin duplicados pasen intactos."""
+    """Valida que eventos únicos sin duplicados pasen intactos."""
     input_data = [
         ("EV300", [{"event_id": "EV300", "action": "click"}])
     ]
@@ -37,3 +40,26 @@ def test_unique_events_pass_through():
         pcoll = p | beam.Create(input_data)
         result = pcoll | beam.ParDo(DeduplicateDoFn())
         assert_that(result, equal_to(expected_output))
+
+
+def test_windowing_and_incremental_aggregation():
+    """Valida la agregación incremental en ventanas temporales fijas asignando timestamps explícitamente."""
+    # Tuplas de entrada: (clave, valor, timestamp_unix)
+    raw_events = [
+        ("A", {"event_id": "1"}, 1000),  # Ventana 1
+        ("A", {"event_id": "2"}, 1020),  # Ventana 1
+        ("A", {"event_id": "3"}, 1070),  # Ventana 2
+    ]
+
+    with TestPipeline() as p:
+        result = (
+            p
+            | "CreateEvents" >> beam.Create(raw_events)
+            # Extrae la tupla (k, v) y le asigna el timestamp para evitar TypeCheckError
+            | "AddTimestamps" >> beam.Map(lambda elem: TimestampedValue((elem[0], elem[1]), elem[2]))
+            | "FixedWindow" >> beam.WindowInto(FixedWindows(60))
+            | "Combine" >> beam.CombinePerKey(CountEventsCombineFn())
+        )
+
+        expected = [("A", 2), ("A", 1)]
+        assert_that(result, equal_to(expected))
